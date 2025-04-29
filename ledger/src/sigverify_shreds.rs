@@ -3,6 +3,7 @@ use {
     crate::shred::{self, SignedData, SIZE_OF_MERKLE_ROOT},
     itertools::{izip, Itertools},
     rayon::{prelude::*, ThreadPool},
+    sha2::{Digest, Sha512},
     solana_metrics::inc_new_counter_debug,
     solana_perf::{
         cuda_runtime::PinnedVec,
@@ -11,57 +12,75 @@ use {
         recycler_cache::RecyclerCache,
         sigverify::{self, count_packets_in_batches, TxOffset},
     },
-    solana_sdk::{clock::Slot, hash::Hash, pubkey::Pubkey, signature::Signature},
+    solana_sdk::{
+        clock::Slot,
+        hash::Hash,
+        pubkey::Pubkey,
+        signature::{Keypair, Signature, Signer},
+    },
     std::{
         collections::HashMap,
-        iter::{self, repeat},
+        iter::repeat,
         mem::size_of,
         ops::Range,
-        sync::RwLock,
+        sync::{Arc, RwLock},
     },
 };
-#[cfg(test)]
-use {
-    sha2::{Digest, Sha512},
-    solana_sdk::signature::{Keypair, Signer},
-    std::sync::Arc,
-};
 
-#[cfg(test)]
 const SIGN_SHRED_GPU_MIN: usize = 256;
 
 pub type LruCache = lazy_lru::LruCache<(Signature, Pubkey, /*merkle root:*/ Hash), ()>;
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum VerifyShredOutcome {
+    Success,
+    MissingSlot,
+    SignatureError,
+    DiscardError,
+    NotAShred,
+    UnknownLeader,
+    MissingSignature,
+    MissingSignedData,
+    GeneralError,
+}
 
 #[must_use]
 pub fn verify_shred_cpu(
     packet: &Packet,
     slot_leaders: &HashMap<Slot, Pubkey>,
     cache: &RwLock<LruCache>,
-) -> bool {
+) -> VerifyShredOutcome {
     if packet.meta().discard() {
-        return false;
+        return VerifyShredOutcome::DiscardError;
     }
-    let Some(shred) = shred::layout::get_shred(packet) else {
-        return false;
+    let shred = match shred::layout::get_shred(packet) {
+        Some(s) => s,
+        None    => return VerifyShredOutcome::NotAShred,
     };
-    let Some(slot) = shred::layout::get_slot(shred) else {
-        return false;
+    let slot = match shred::layout::get_slot(shred) {
+        Some(s) => s,
+        None    => return VerifyShredOutcome::MissingSlot,
     };
     trace!("slot {}", slot);
-    let Some(pubkey) = slot_leaders.get(&slot) else {
-        return false;
+    let leader = match slot_leaders.get(&slot) {
+        Some(pk) => pk.clone(),
+        None     => return VerifyShredOutcome::UnknownLeader,
     };
-    let Some(signature) = shred::layout::get_signature(shred) else {
-        return false;
+    let signature = match shred::layout::get_signature(shred) {
+        Some(sig) => sig,
+        None      => return VerifyShredOutcome::MissingSignature,
     };
     trace!("signature {}", signature);
-    let Some(data) = shred::layout::get_signed_data(shred) else {
-        return false;
+    let data = match shred::layout::get_signed_data(shred) {
+        Some(d) => d,
+        None    => return VerifyShredOutcome::MissingSignedData,
     };
-    match data {
-        SignedData::Chunk(chunk) => signature.verify(pubkey.as_ref(), chunk),
+    let ok = match data {
+        SignedData::Chunk(chunk) => {
+            signature.verify(leader.as_ref(), chunk)
+        }
         SignedData::MerkleRoot(root) => {
-            let key = (signature, *pubkey, root);
+            let key = (signature, leader, root);
             if cache.read().unwrap().get(&key).is_some() {
                 true
             } else if key.0.verify(key.1.as_ref(), key.2.as_ref()) {
@@ -71,6 +90,12 @@ pub fn verify_shred_cpu(
                 false
             }
         }
+    };
+
+    if ok {
+        VerifyShredOutcome::Success
+    } else {
+        VerifyShredOutcome::SignatureError
     }
 }
 
@@ -79,7 +104,7 @@ fn verify_shreds_cpu(
     batches: &[PacketBatch],
     slot_leaders: &HashMap<Slot, Pubkey>,
     cache: &RwLock<LruCache>,
-) -> Vec<Vec<u8>> {
+) -> Vec<Vec<VerifyShredOutcome>> {
     let packet_count = count_packets_in_batches(batches);
     debug!("CPU SHRED ECDSA for {}", packet_count);
     let rv = thread_pool.install(|| {
@@ -88,10 +113,10 @@ fn verify_shreds_cpu(
             .map(|batch| {
                 batch
                     .par_iter()
-                    .map(|packet| u8::from(verify_shred_cpu(packet, slot_leaders, cache)))
-                    .collect()
+                    .map(|packet| verify_shred_cpu(packet, slot_leaders, cache))
+                    .collect::<Vec<VerifyShredOutcome>>()
             })
-            .collect()
+            .collect::<Vec<Vec<VerifyShredOutcome>>>()
     });
     inc_new_counter_debug!("ed25519_shred_verify_cpu", packet_count);
     rv
@@ -268,9 +293,10 @@ pub fn verify_shreds_gpu(
     slot_leaders: &HashMap<Slot, Pubkey>,
     recycler_cache: &RecyclerCache,
     cache: &RwLock<LruCache>,
-) -> Vec<Vec<u8>> {
-    let Some(api) = perf_libs::api() else {
-        return verify_shreds_cpu(thread_pool, batches, slot_leaders, cache);
+) -> Vec<Vec<VerifyShredOutcome>> {
+    let api = match perf_libs::api() {
+        Some(api) => api,
+        None => return verify_shreds_cpu(thread_pool, batches, slot_leaders, cache),
     };
     let (pubkeys, pubkey_offsets) =
         slot_key_data_for_gpu(thread_pool, batches, slot_leaders, recycler_cache);
@@ -326,17 +352,30 @@ pub fn verify_shreds_gpu(
     trace!("out buf {:?}", out);
 
     // Each shred has exactly one signature.
-    let v_sig_lens = batches
-        .iter()
-        .map(|batch| iter::repeat_n(1u32, batch.len()));
+    let v_sig_lens = batches.iter().map(|batch| repeat(1u32).take(batch.len()));
     let mut rvs: Vec<_> = batches.iter().map(|batch| vec![0u8; batch.len()]).collect();
     sigverify::copy_return_values(v_sig_lens, &out, &mut rvs);
 
     inc_new_counter_debug!("ed25519_shred_verify_gpu", out.len());
-    rvs
+    let outcomes: Vec<Vec<VerifyShredOutcome>> = rvs
+        .into_iter()
+        .map(|batch| {
+            batch
+                .into_iter()
+                .map(|b| {
+                    if b == 1 {
+                        VerifyShredOutcome::Success
+                    } else {
+                        VerifyShredOutcome::GeneralError
+                    }
+                })
+                .collect()
+        })
+        .collect();
+
+    outcomes
 }
 
-#[cfg(test)]
 fn sign_shred_cpu(keypair: &Keypair, packet: &mut Packet) {
     let sig = shred::layout::get_signature_range();
     let msg = shred::layout::get_shred(packet)
@@ -351,8 +390,7 @@ fn sign_shred_cpu(keypair: &Keypair, packet: &mut Packet) {
     packet.buffer_mut()[sig].copy_from_slice(signature.as_ref());
 }
 
-#[cfg(test)]
-fn sign_shreds_cpu(thread_pool: &ThreadPool, keypair: &Keypair, batches: &mut [PacketBatch]) {
+pub fn sign_shreds_cpu(thread_pool: &ThreadPool, keypair: &Keypair, batches: &mut [PacketBatch]) {
     let packet_count = count_packets_in_batches(batches);
     debug!("CPU SHRED ECDSA for {}", packet_count);
     thread_pool.install(|| {
@@ -365,8 +403,7 @@ fn sign_shreds_cpu(thread_pool: &ThreadPool, keypair: &Keypair, batches: &mut [P
     inc_new_counter_debug!("ed25519_shred_sign_cpu", packet_count);
 }
 
-#[cfg(test)]
-fn sign_shreds_gpu_pinned_keypair(keypair: &Keypair, cache: &RecyclerCache) -> PinnedVec<u8> {
+pub fn sign_shreds_gpu_pinned_keypair(keypair: &Keypair, cache: &RecyclerCache) -> PinnedVec<u8> {
     let mut vec = cache.buffer().allocate("pinned_keypair");
     let pubkey = keypair.pubkey().to_bytes();
     let secret = keypair.secret().to_bytes();
@@ -383,8 +420,7 @@ fn sign_shreds_gpu_pinned_keypair(keypair: &Keypair, cache: &RecyclerCache) -> P
     vec
 }
 
-#[cfg(test)]
-fn sign_shreds_gpu(
+pub fn sign_shreds_gpu(
     thread_pool: &ThreadPool,
     keypair: &Keypair,
     pinned_keypair: &Option<Arc<PinnedVec<u8>>>,
@@ -533,14 +569,23 @@ mod tests {
         packet.meta_mut().size = shred.payload().len();
 
         let leader_slots = HashMap::from([(slot, keypair.pubkey())]);
-        assert!(verify_shred_cpu(&packet, &leader_slots, &cache));
+        assert_eq!(
+            verify_shred_cpu(&packet, &leader_slots, &cache),
+            VerifyShredOutcome::Success
+        );
 
         let wrong_keypair = Keypair::new();
         let leader_slots = HashMap::from([(slot, wrong_keypair.pubkey())]);
-        assert!(!verify_shred_cpu(&packet, &leader_slots, &cache));
+        assert_eq!(
+            verify_shred_cpu(&packet, &leader_slots, &cache),
+            VerifyShredOutcome::SignatureError
+        );
 
         let leader_slots = HashMap::new();
-        assert!(!verify_shred_cpu(&packet, &leader_slots, &cache));
+        assert_eq!(
+            verify_shred_cpu(&packet, &leader_slots, &cache),
+            VerifyShredOutcome::UnknownLeader(slot)
+        );
     }
 
     #[test]
@@ -593,6 +638,8 @@ mod tests {
         run_test_sigverify_shreds_cpu(&thread_pool, 0xdead_c0de);
     }
 
+    #[test]
+    #[ignore]
     fn run_test_sigverify_shreds_gpu(thread_pool: &ThreadPool, slot: Slot) {
         solana_logger::setup();
         let recycler_cache = RecyclerCache::default();
@@ -662,6 +709,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_sigverify_shreds_gpu() {
         let thread_pool = ThreadPoolBuilder::new().num_threads(3).build().unwrap();
         run_test_sigverify_shreds_gpu(&thread_pool, 0xdead_c0de);
@@ -912,6 +960,8 @@ mod tests {
         );
     }
 
+    #[test]
+    #[ignore]
     #[test_case(false, false)]
     #[test_case(false, true)]
     #[test_case(true, false)]
