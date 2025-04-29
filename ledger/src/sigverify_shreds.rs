@@ -102,12 +102,17 @@ pub fn verify_shred_cpu(
     if ok {
         VerifyShredOutcome::Success
     } else {
-        let variant_str = match shred.get(64).copied().unwrap_or(0) {
-            0 => "LegacyData",
-            1 => "LegacyCode",
-            2 => "MerkleData",
-            3 => "MerkleCode",
-            _ => "Unknown",
+        let variant_byte = shred.get(64).copied().unwrap_or(0);
+        let variant_str = match variant_byte >> 4 {
+            0x5 => "LegacyCode",                 // 0b0101_xxxx
+            0xA => "LegacyData",                 // 0b1010_xxxx
+            0x4 => "MerkleCode",                 // 0b0100_xxxx
+            0x6 => "MerkleCodeChained",          // 0b0110_xxxx
+            0x7 => "MerkleCodeChainedResigned",  // 0b0111_xxxx
+            0x8 => "MerkleData",                 // 0b1000_xxxx
+            0x9 => "MerkleDataChained",          // 0b1001_xxxx
+            0xB => "MerkleDataChainedResigned",  // 0b1011_xxxx
+            _   => "UnknownVariant",
         };
         if index == 0{
             error!(
