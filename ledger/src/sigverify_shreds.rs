@@ -95,9 +95,15 @@ pub fn verify_shred_cpu(
         }
     };
 
+        let index = shred::layout::get_index(shred)
+        .unwrap_or(0);
+
+
     if ok {
         VerifyShredOutcome::Success
     } else {
+        error!(
+            "🛑 SignatureError: slot={} index={} sig={}",slot, index,signature);
         VerifyShredOutcome::SignatureError
     }
 }

@@ -612,6 +612,7 @@ mod tests {
             &RecyclerCache::warmed(),
             &mut batches,
             &cache,
+            stats,
         );
         assert!(!batches[0][0].meta().discard());
         assert!(batches[0][1].meta().discard());
