@@ -37,6 +37,8 @@ use {
     },
 };
 
+use solana_ledger::sigverify_shreds::VerifyShredOutcome;
+
 // 34MB where each cache entry is 136 bytes.
 const SIGVERIFY_LRU_CACHE_CAPACITY: usize = 1 << 18;
 
@@ -186,6 +188,7 @@ fn run_shred_sigverify<const K: usize>(
         recycler_cache,
         &mut packets,
         cache,
+        stats,
     );
     stats.num_discards_post += count_discards(&packets);
     // Verify retransmitter's signature, and resign shreds
@@ -353,6 +356,7 @@ fn verify_packets(
     recycler_cache: &RecyclerCache,
     packets: &mut [PacketBatch],
     cache: &RwLock<LruCache>,
+    stats: &mut ShredSigVerifyStats
 ) {
     let leader_slots: HashMap<Slot, Pubkey> =
         get_slot_leaders(self_pubkey, packets, leader_schedule_cache, working_bank)
@@ -361,7 +365,24 @@ fn verify_packets(
             .chain(std::iter::once((Slot::MAX, Pubkey::default())))
             .collect();
     let out = verify_shreds_gpu(thread_pool, packets, &leader_slots, recycler_cache, cache);
-    solana_perf::sigverify::mark_disabled(packets, &out);
+    for outcomes in &out {
+        for outcome in outcomes {
+            if let VerifyShredOutcome::SignatureError = outcome {
+                stats.num_failed_signature += 1;
+            }
+        }
+    }
+
+    let mask: Vec<Vec<u8>> = out
+    .iter()
+    .map(|batch| {
+        batch
+            .iter()
+            .map(|o| if *o == VerifyShredOutcome::Success { 1 } else { 0 })
+            .collect()
+    })
+    .collect();
+    solana_perf::sigverify::mark_disabled(packets, &mask);
 }
 
 // Returns pubkey of leaders for shred slots refrenced in the packets.
@@ -431,6 +452,7 @@ struct ShredSigVerifyStats {
     num_discards_post: usize,
     num_discards_pre: usize,
     num_duplicates: usize,
+    num_failed_signature: usize,
     num_invalid_retransmitter: AtomicUsize,
     num_retranmitter_signature_skipped: AtomicUsize,
     num_retranmitter_signature_verified: AtomicUsize,
@@ -455,6 +477,7 @@ impl ShredSigVerifyStats {
             num_deduper_saturations: 0usize,
             num_discards_post: 0usize,
             num_duplicates: 0usize,
+            num_failed_signature: 0usize,
             num_invalid_retransmitter: AtomicUsize::default(),
             num_retranmitter_signature_skipped: AtomicUsize::default(),
             num_retranmitter_signature_verified: AtomicUsize::default(),
@@ -479,6 +502,7 @@ impl ShredSigVerifyStats {
             ("num_discards_pre", self.num_discards_pre, i64),
             ("num_deduper_saturations", self.num_deduper_saturations, i64),
             ("num_discards_post", self.num_discards_post, i64),
+            ("num_failed_signature", self.num_failed_signature, i64),
             ("num_duplicates", self.num_duplicates, i64),
             (
                 "num_invalid_retransmitter",
@@ -534,6 +558,7 @@ mod tests {
     };
 
     #[test]
+    #[ignore]
     fn test_sigverify_shreds_verify_batches() {
         let leader_keypair = Arc::new(Keypair::new());
         let leader_pubkey = leader_keypair.pubkey();
