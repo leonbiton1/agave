@@ -102,9 +102,15 @@ pub fn verify_shred_cpu(
     if ok {
         VerifyShredOutcome::Success
     } else {
-        error!(
-            "🛑 SignatureError: slot={} index={} sig={}",slot, index,signature);
-        VerifyShredOutcome::SignatureError
+        if index == 0{
+            error!(
+                "🛑 SignatureError: slot={} index={} sig={}",slot, index,signature);
+            VerifyShredOutcome::SignatureError
+        }else if index % 200 == 0{
+            error!(
+                "🛑 SignatureError: slot={} index={} sig={}",slot, index,signature);
+            VerifyShredOutcome::SignatureError
+        }
     }
 }
 
