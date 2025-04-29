@@ -102,12 +102,19 @@ pub fn verify_shred_cpu(
     if ok {
         VerifyShredOutcome::Success
     } else {
+        let variant_str = match shred.get(64).copied().unwrap_or(0) {
+            0 => "LegacyData",
+            1 => "LegacyCode",
+            2 => "MerkleData",
+            3 => "MerkleCode",
+            _ => "Unknown",
+        };
         if index == 0{
             error!(
-                "🛑 SignatureError: slot={} index={} sig={}",slot, index,signature);
+                "🛑 SignatureError: slot={} index={} variant={} sig={}",slot, index,variant_str,signature);
         }else if index % 200 == 0{
             error!(
-                "🛑 SignatureError: slot={} index={} sig={}",slot, index,signature);
+                "🛑 SignatureError: slot={} index={} variant={} sig={}",slot, index,variant_str,signature);
         }
         VerifyShredOutcome::SignatureError
     }
