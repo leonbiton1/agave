@@ -8480,6 +8480,7 @@ dependencies = [
  "eager",
  "fs_extra",
  "futures 0.3.31",
+ "hex",
  "itertools 0.12.1",
  "lazy-lru",
  "lazy_static",

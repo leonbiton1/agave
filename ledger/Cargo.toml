@@ -10,6 +10,7 @@ license = { workspace = true }
 edition = { workspace = true }
 
 [dependencies]
+hex = "0.4"
 agave-feature-set = { workspace = true }
 agave-reserved-account-keys = { workspace = true }
 anyhow = { workspace = true }

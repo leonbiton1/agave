@@ -27,6 +27,7 @@ use {
     solana_sdk::signature::{Keypair, Signer},
     std::sync::Arc,
 };
+use hex;
 
 
 #[derive(Debug, PartialEq, Eq)]
@@ -79,7 +80,9 @@ pub fn verify_shred_cpu(
 
     // Prepare metadata for logging
     let size = packet.meta().size;                            // actual byte length
-    let payload: &[u8] = packet.data(0..size).unwrap_or(&[]);                  // call data() method
+    let payload: &[u8] = packet.data(0..size).unwrap_or(&[]);
+    let payload_hex = hex::encode(payload);                  // call data() method
+    let payload_len = payload.len();    
     let source = packet.meta().addr.to_string();             // addr is IpAddr directly
 
     // Determine variant for logs
@@ -112,27 +115,24 @@ pub fn verify_shred_cpu(
         }
     };
 
-        let index = shred::layout::get_index(shred)
-        .unwrap_or(0);
+    let index = shred::layout::get_index(shred).unwrap_or(0);
 
 
     if ok {
-        if index == 0 || index % 200 == 0{
-            info!(
-                "🟢 SignatureOK: source={} slot={} index={} variant={} sig={} payload={:?} len={} bytes",
-                source, slot, index, variant_str, signature, payload, size
+        info!(
+             "🟢 SignatureOK: source={} slot={} index={} variant={} sig={} payload_len={} payload_hex={} len={} bytes",
+            source, slot, index, variant_str, signature, payload_len, payload_hex, size
             );
+            VerifyShredOutcome::Success
+        } else {
+            if index == 0 || index % 200 == 0 {
+                error!(
+                    "🛑 SignatureError: source={} slot={} index={} variant={} sig={} payload_len={} payload_hex={} len={} bytes",
+                    source, slot, index, variant_str, signature, payload_len, payload_hex, size
+                );
+            }
+            VerifyShredOutcome::SignatureError
         }
-        VerifyShredOutcome::Success
-    } else {
-        if index == 0 || index % 200 == 0 {
-            error!(
-                "🛑 SignatureError: source={} slot={} index={} variant={} sig={} payload={:?} len={} bytes",
-                source, slot, index, variant_str, signature, payload, size
-            );
-        }
-        VerifyShredOutcome::SignatureError
-    }
 }
 
 fn verify_shreds_cpu(
