@@ -64,7 +64,6 @@ pub fn verify_shred_cpu(
         Some(s) => s,
         None    => return VerifyShredOutcome::MissingSlot,
     };
-    trace!("slot {}", slot);
     let leader = match slot_leaders.get(&slot) {
         Some(pk) => pk.clone(),
         None     => return VerifyShredOutcome::UnknownLeader,
@@ -73,10 +72,28 @@ pub fn verify_shred_cpu(
         Some(sig) => sig,
         None      => return VerifyShredOutcome::MissingSignature,
     };
-    trace!("signature {}", signature);
     let data = match shred::layout::get_signed_data(shred) {
         Some(d) => d,
         None    => return VerifyShredOutcome::MissingSignedData,
+    };
+
+    // Prepare metadata for logging
+    let size = packet.meta().size;                            // actual byte length
+    let payload: &[u8] = packet.data(0..size).unwrap_or(&[]);                  // call data() method
+    let source = packet.meta().addr.to_string();             // addr is IpAddr directly
+
+    // Determine variant for logs
+    let variant_byte = shred.get(64).copied().unwrap_or(0);
+    let variant_str = match variant_byte >> 4 {
+        0x5 => "LegacyCode",
+        0xA => "LegacyData",
+        0x4 => "MerkleCode",
+        0x6 => "MerkleCodeChained",
+        0x7 => "MerkleCodeChainedResigned",
+        0x8 => "MerkleData",
+        0x9 => "MerkleDataChained",
+        0xB => "MerkleDataChainedResigned",
+        _   => "UnknownVariant",
     };
     let ok = match data {
         SignedData::Chunk(chunk) => {
@@ -100,26 +117,19 @@ pub fn verify_shred_cpu(
 
 
     if ok {
+        if index == 0 || index % 200 == 0{
+            info!(
+                "🟢 SignatureOK: source={} slot={} index={} variant={} sig={} payload={:?} len={} bytes",
+                source, slot, index, variant_str, signature, payload, size
+            );
+        }
         VerifyShredOutcome::Success
     } else {
-        let variant_byte = shred.get(64).copied().unwrap_or(0);
-        let variant_str = match variant_byte >> 4 {
-            0x5 => "LegacyCode",                 // 0b0101_xxxx
-            0xA => "LegacyData",                 // 0b1010_xxxx
-            0x4 => "MerkleCode",                 // 0b0100_xxxx
-            0x6 => "MerkleCodeChained",          // 0b0110_xxxx
-            0x7 => "MerkleCodeChainedResigned",  // 0b0111_xxxx
-            0x8 => "MerkleData",                 // 0b1000_xxxx
-            0x9 => "MerkleDataChained",          // 0b1001_xxxx
-            0xB => "MerkleDataChainedResigned",  // 0b1011_xxxx
-            _   => "UnknownVariant",
-        };
-        if index == 0{
+        if index == 0 || index % 200 == 0 {
             error!(
-                "🛑 SignatureError: slot={} index={} variant={} sig={}",slot, index,variant_str,signature);
-        }else if index % 200 == 0{
-            error!(
-                "🛑 SignatureError: slot={} index={} variant={} sig={}",slot, index,variant_str,signature);
+                "🛑 SignatureError: source={} slot={} index={} variant={} sig={} payload={:?} len={} bytes",
+                source, slot, index, variant_str, signature, payload, size
+            );
         }
         VerifyShredOutcome::SignatureError
     }
