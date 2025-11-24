@@ -67,7 +67,8 @@ pub fn verify_shred_cpu(
     let Some(data) = shred::layout::get_signed_data(shred) else {
         return false;
     };
-    match data {
+    let index = shred::layout::get_index(shred).unwrap_or(0);
+    let verified = match data {
         SignedData::Chunk(chunk) => signature.verify(pubkey.as_ref(), chunk),
         SignedData::MerkleRoot(root) => {
             let key = (signature, *pubkey, root);
@@ -80,7 +81,14 @@ pub fn verify_shred_cpu(
                 false
             }
         }
+    };
+    if !verified {
+        info!(
+            "🛑 CPU signature verification failed: slot={} index={}",
+            slot, index
+        );
     }
+    verified
 }
 
 fn verify_shreds_cpu(
@@ -350,6 +358,24 @@ pub fn verify_shreds_gpu(
         .map(|batch| iter::repeat_n(1u32, batch.len()));
     let mut rvs: Vec<_> = batches.iter().map(|batch| vec![0u8; batch.len()]).collect();
     sigverify::copy_return_values(v_sig_lens, &out, &mut rvs);
+
+    // Log GPU signature verification failures
+    for (batch_outcomes, batch_packets) in rvs.iter().zip(batches.iter()) {
+        for (idx, outcome) in batch_outcomes.iter().enumerate() {
+            if *outcome == 0u8 {
+                if let Some(packet) = batch_packets.get(idx) {
+                    if let Some(shred_bytes) = shred::layout::get_shred(packet.as_ref()) {
+                        let slot = shred::layout::get_slot(shred_bytes).unwrap_or_default();
+                        let index = shred::layout::get_index(shred_bytes).unwrap_or(0);
+                        info!(
+                            "🛑 GPU signature verification failed: slot={} index={}",
+                            slot, index
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     inc_new_counter_debug!("ed25519_shred_verify_gpu", out.len());
     rvs
