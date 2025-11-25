@@ -129,7 +129,7 @@ pub fn execute(
 
     info!("{} {}", crate_name!(), solana_version);
     info!("Starting validator with: {:#?}", std::env::args_os());
-    info!("leon test !!!!")
+    info!("leon test !!!!");
 
     let cuda = matches.is_present("cuda");
     if cuda {
