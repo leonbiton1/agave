@@ -83,7 +83,7 @@ pub fn verify_shred_cpu(
         }
     };
     if !verified {
-        info!(
+        error!(
             "🛑 CPU signature verification failed: slot={} index={}",
             slot, index
         );

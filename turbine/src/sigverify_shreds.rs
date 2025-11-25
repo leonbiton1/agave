@@ -96,6 +96,7 @@ pub fn spawn_shred_sigverify(
         .build()
         .expect("new rayon threadpool");
     let run_shred_sigverify = move || {
+        info!("shred_sigverify thread starting (shred signature verification)");
         let mut rng = rand::thread_rng();
         let mut deduper = Deduper::<2, [u8]>::new(&mut rng, DEDUPER_NUM_BITS);
         let mut shred_buffer = Vec::with_capacity(SIGVERIFY_SHRED_BATCH_SIZE);
