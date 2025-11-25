@@ -364,7 +364,7 @@ pub fn verify_shreds_gpu(
         for (idx, outcome) in batch_outcomes.iter().enumerate() {
             if *outcome == 0u8 {
                 if let Some(packet) = batch_packets.get(idx) {
-                    if let Some(shred_bytes) = shred::layout::get_shred(packet.as_ref()) {
+                    if let Some(shred_bytes) = shred::layout::get_shred(packet) {
                         let slot = shred::layout::get_slot(shred_bytes).unwrap_or_default();
                         let index = shred::layout::get_index(shred_bytes).unwrap_or(0);
                         info!(
